@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI 旅行路线规划师</title>
+    <!-- CDN 引入 Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Microsoft YaHei', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            color: white;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .form-card {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        
+        .form-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .form-group {
+            display: flex;
+            flex-direction: column;
+        }
+        
+        label {
+            font-weight: bold;
+            margin-bottom: 8px;
+            color: #333;
+        }
+        
+        select, input, textarea {
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+        
+        select:focus, input:focus, textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        textarea {
+            resize: vertical;
+            min-height: 80px;
+        }
+        
+        .submit-btn {
+            width: 100%;
+            padding: 15px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+        
+        .submit-btn:hover {
+            transform: translateY(-2px);
+        }
+        
+        .submit-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        
+        .result-card {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-top: 30px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        
+        .result-title {
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 15px;
+            color: #333;
+        }
+        
+        .ai-response {
+            line-height: 1.8;
+            color: #555;
+            white-space: pre-wrap;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="container">
+            <h1>🤖 AI 旅行路线规划师</h1>
+            
+            <!-- 表单区域 -->
+            <div class="form-card">
+                <form @submit.prevent="submitForm">
+                    <!-- 第一行：天数和出行类型 -->
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>旅行天数</label>
+                            <select v-model="form.duration_days" required>
+                                <option value="" disabled>请选择</option>
+                                <option value="1">1 日游</option>
+                                <option value="2">2 天 1 夜</option>
+                                <option value="3">3 天 2 夜</option>
+                                <option value="5">5 天 4 夜</option>
+                                <option value="7">7 天 6 夜</option>
+                                <option value="10">10 天 9 夜</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>出行类型</label>
+                            <select v-model="form.trip_type" required>
+                                <option value="" disabled>请选择</option>
+                                <option value="personal">个人游</option>
+                                <option value="family">家庭游</option>
+                                <option value="couple">情侣游</option>
+                                <option value="friends">朋友游</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- 第二行：旅行风格和预算 -->
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>旅行风格</label>
+                            <select v-model="form.style" required>
+                                <option value="" disabled>请选择</option>
+                                <option value="relaxed">轻松休闲</option>
+                                <option value="intensive">紧凑打卡</option>
+                                <option value="cultural">文化深度</option>
+                                <option value="adventure">冒险探索</option>
+                            </select>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>预算等级</label>
+                            <select v-model="form.budget_level">
+                                <option value="budget">经济实惠</option>
+                                <option value="medium">舒适品质</option>
+                                <option value="luxury">豪华享受</option>
+                            </select>
+                        </div>
+                    </div>
+                    
+                    <!-- 第三行：城市选择 -->
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label>出发城市</label>
+                            <input 
+                                type="text" 
+                                v-model="form.origin_city" 
+                                placeholder="例如：上海"
+                                required
+                            >
+                        </div>
+                        
+                        <div class="form-group">
+                            <label>目的地</label>
+                            <input 
+                                type="text" 
+                                v-model="form.destination" 
+                                placeholder="例如：北京"
+                                required
+                            >
+                        </div>
+                    </div>
+                    
+                    <!-- 兴趣标签（多选） -->
+                    <div class="form-group" style="margin-bottom: 20px;">
+                        <label>兴趣标签（可多选）</label>
+                        <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                            <label v-for="interest in allInterests" :key="interest" style="display: inline-flex; align-items: center; gap: 5px;">
+                                <input 
+                                    type="checkbox" 
+                                    :value="interest" 
+                                    v-model="form.interests"
+                                >
+                                {{ interest }}
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- 补充说明 -->
+                    <div class="form-group" style="margin-bottom: 20px;">
+                        <label>补充说明（可选）</label>
+                        <textarea 
+                            v-model="form.message" 
+                            placeholder="例如：希望安排适合老人的行程，不要太累..."
+                        ></textarea>
+                    </div>
+                    
+                    <!-- 提交按钮 -->
+                    <button 
+                        type="submit" 
+                        class="submit-btn"
+                        :disabled="isGenerating"
+                    >
+                        {{ isGenerating ? '✨ AI 正在规划中...' : '🚀 开始规划行程' }}
+                    </button>
+                </form>
+            </div>
+            
+            <!-- 结果显示区域 -->
+            <div v-if="responseText" class="result-card">
+                <div class="result-title">📋 AI 生成的行程规划</div>
+                <div class="ai-response" v-html="renderedText"></div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        const { createApp } = Vue;
+        
+        createApp({
+            data() {
+                return {
+                    // 所有可选兴趣标签
+                    allInterests: ['美食', '拍照', '历史', '购物', '自然', '博物馆', '主题公园', '海滩'],
+                    
+                    // 表单数据（与后端 Schema 字段名完全一致！）
+                    form: {
+                        user_id: 'user_' + Date.now(),
+                        duration_days: '',
+                        trip_type: '',
+                        style: '',
+                        origin_city: '',
+                        destination: '',
+                        budget_level: 'medium',
+                        interests: [],
+                        message: ''
+                    },
+                    
+                    responseText: '',
+                    isGenerating: false
+                }
+            },
+            
+            computed: {
+                renderedText() {
+                    // 简单的换行符转 HTML
+                    return this.responseText.replace(/\n/g, '<br>');
+                }
+            },
+            
+            methods: {
+                async submitForm() {
+                    this.isGenerating = true;
+                    this.responseText = '';
+                    
+                    try {
+                        const response = await fetch('http://localhost:5000/chat/stream', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(this.form)
+                        });
+                        
+                        if (!response.ok) {
+                            const error = await response.json();
+                            throw new Error(error.details || '请求失败');
+                        }
+                        
+                        // 处理 SSE 流式响应
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+                        
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            
+                            const chunk = decoder.decode(value);
+                            const lines = chunk.split('\n');
+                            
+                            for (const line of lines) {
+                                if (line.startsWith('data: ')) {
+                                    const data = line.slice(6);
+                                    
+                                    if (data === '[DONE]') {
+                                        break;
+                                    }
+                                    
+                                    try {
+                                        const parsed = JSON.parse(data);
+                                        if (parsed.text) {
+                                            this.responseText += parsed.text;
+                                        }
+                                    } catch (e) {
+                                        console.error('解析失败:', e);
+                                    }
+                                }
+                            }
+                        }
+                        
+                    } catch (error) {
+                        console.error('生成失败:', error);
+                        alert('生成失败：' + error.message);
+                    } finally {
+                        this.isGenerating = false;
+                    }
+                }
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
