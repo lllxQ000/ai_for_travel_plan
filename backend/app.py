@@ -1,214 +1,227 @@
+"""
+Flask 应用 - 后端 API 服务
+技术原理：提供 RESTful API 接口，连接前端与 RAG pipeline
+面试考点：API 设计、CORS 处理、错误处理
+
+架构说明：
+- app.py: 中枢调用模块（伪 OpenCLaw），仅负责路由和模块调用
+- llm_service.py: LLM 生成服务（路线详情、小红书概览）
+- rag_pipeline.py: RAG 检索 Pipeline（旅游路线检索）
+"""
 import os
-from flask import Flask, request, Response, jsonify, send_from_directory, stream_with_context
+import sys
+from dotenv import load_dotenv
+
+# 加载 .env 文件
+load_dotenv()
+
+# 清除代理环境变量
+for proxy_var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
+    os.environ.pop(proxy_var, None)
+
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import asyncio
-from pydantic import ValidationError
-from agent import chat_with_agent_stream
-from document_loader import DocumentLoader
-from rag_utils import embedding_service, chroma_client, parent_store, initialize_csv_knowledge_base
-from conversation_storage import ConversationStorage
 
-storage = ConversationStorage()
-from schema import ChatRequest, DocumentUploadResponse
+# 添加 backend 目录到 Python 路径
+backend_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, backend_dir)
+
 from utils import logger
+from llm_service import get_llm_service, LLMService
+from rag_pipeline import RAGPipeline
 
-
-app = Flask(__name__, static_folder='../frontend', static_url_path='')
+# 使用绝对路径指向 frontend 目录
+frontend_dir = os.path.join(backend_dir, '..', 'frontend')
+app = Flask(__name__, static_folder=frontend_dir, static_url_path='')
 CORS(app)
 
-# 初始化文档处理器
-doc_loader = DocumentLoader()
+# 初始化服务（单例模式）
+rag_pipeline = RAGPipeline()
+llm_service = get_llm_service()
 
-# 初始化 CSV 知识库（应用启动时一次性操作）
-with app.app_context():
-    try:
-        initialize_csv_knowledge_base()
-        logger.info("CSV 知识库初始化成功")
-    except Exception as e:
-        logger.error(f"CSV 知识库初始化失败：{e}")
+
+# ==================== 工具函数 ====================
+
+def extract_destination(product_name: str) -> str:
+    """从产品名称中提取目的地"""
+    if not product_name:
+        return '目的地'
+
+    destinations = [
+        "桂林", "阳朔", "昆明", "大理", "丽江", "香格里拉", "西双版纳",
+        "北京", "上海", "广州", "深圳", "成都", "重庆", "西安",
+        "杭州", "南京", "苏州", "厦门", "三亚", "海口", "长沙",
+        "张家界", "九寨沟", "黄山", "拉萨", "乌鲁木齐"
+    ]
+
+    for dest in destinations:
+        if dest in product_name:
+            return dest
+
+    return product_name.split()[0] if product_name else '目的地'
+
+
+def generate_template_route(destination: str, days: int, preferences: list = None) -> dict:
+    """降级方案：返回通用模板（当 LLM 失败时使用）"""
+    return {
+        "overview": f"{destination}{days}天深度游，体验当地核心景点与特色美食。",
+        "schedule": [
+            {
+                "day": i+1,
+                "theme": f"第{i+1}天探索",
+                "items": [
+                    {"time": "09:00-11:30", "activity": f"{destination}核心景点 A", "type": "sightseeing", "transport": "打车/公交", "ticket_info": "需提前预约", "is_must": True},
+                    {"time": "12:00-13:30", "activity": "当地特色餐厅", "type": "food", "avg_cost": "50-80 元"},
+                    {"time": "14:00-17:00", "activity": f"{destination}核心景点 B", "type": "sightseeing", "is_must": False}
+                ]
+            } for i in range(days)
+        ],
+        "food_recommendations": [
+            {"name": "当地老字号", "type": "特色菜", "avg_cost": "60 元", "signature_dish": "招牌菜"}
+        ],
+        "accommodation": [
+            {"name": "市中心酒店", "location": "市区", "advantage": "交通便利，靠近景点"}
+        ],
+        "travel_tips": [
+            "建议提前预订门票",
+            "注意防晒和补水"
+        ],
+        "estimated_budget": {"total": "600-1000 元/人"}
+    }
+
+
+# ==================== API 路由 ====================
 
 @app.route('/')
-def index():
+def serve_index():
+    """提供前端首页"""
     return send_from_directory(app.static_folder, 'index.html')
 
-@app.route('/chat/stream', methods=['POST'])
-def chat_stream():
+
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """健康检查接口"""
+    return jsonify({
+        "status": "ok",
+        "message": "AI 旅游路线规划师服务运行中"
+    })
+
+
+@app.route('/api/generate', methods=['POST'])
+def generate_route():
     """
-    接收前端表单 JSON 并流式返回 AI 生成的行程
-    
-    请求体示例：
-    {
-        "user_id": "user_123",
-        "preferences": {
-            "duration_days": 5,
-            "trip_type": "family",
-            "style": "relaxed",
-            "origin_city": "上海",
-            "destination": "北京",
-            "interests": ["美食", "拍照"]
-        },
-        "message": "希望安排适合老人的行程"
-    }
-    
-    响应格式：SSE (text/event-stream)
-    data: {"text": "第一天：抵达北京...\n"}
-    
-    data: {"text": "第二天：参观故宫...\n"}
-    
-    data: [DONE]
+    生成旅游路线 API
+    调用 RAG Pipeline 检索知识库中的路线
     """
-    data = request.get_json()
-    
-    if not data:
-        return jsonify({"error": "需要 JSON 格式的请求体"}), 400
-    
     try:
-        # Pydantic 自动验证数据结构
-        req = ChatRequest(**data)
-        
-        # 从表单构建查询（关键步骤！）
-        query = build_query_from_preferences(req.preferences)
-        
-        # 合并用户补充说明
-        full_query = f"{query}\n\n用户补充要求：{req.message}" if req.message else query
-        
-        async def generate():
-            async for chunk in chat_with_agent_stream(
-                full_query,
-                user_id=req.user_id,
-                session_id=req.session_id
-            ):
-                yield chunk
-        
-        return Response(stream_with_context(generate()), mimetype='text/event-stream')
-        
-    except ValidationError as e:
-        # 返回详细验证错误（前端可定位到具体字段）
-        return jsonify({
-            "error": "数据验证失败",
-            "details": e.errors()
-        }), 422
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "请求体不能为空"}), 400
 
+        destination = data.get('destination', '').strip()
+        days = data.get('days', 5)
+        preferences = data.get('preferences', [])
 
-def build_query_from_preferences(prefs):
-    """
-    将结构化表单转为向量检索查询
-    技术原理：Query Rewriting 提升检索效果
-    面试考点：如何将结构化数据映射到非结构化检索
-    """
-    style_map = {
-        "relaxed": "轻松休闲",
-        "intensive": "紧凑高效",
-        "cultural": "文化深度",
-        "adventure": "冒险探索"
-    }
-    
-    interests_str = ", ".join(prefs.interests) if prefs.interests else "无特殊要求"
-    
-    query = f"""为{prefs.trip_type}游客规划{prefs.destination}{prefs.duration_days}天的行程
-风格：{style_map.get(prefs.style, '休闲')}
-预算：{prefs.budget_level}
-兴趣点：{interests_str}
-出发地：{prefs.origin_city}""".strip()
-    
-    return query
+        if not destination:
+            return jsonify({"error": "目的地不能为空"}), 400
 
+        logger.info(f"收到路线生成请求：目的地={destination}, 天数={days}, 偏好={preferences}")
 
-def build_metadata_filters(prefs):
-    """
-    从表单构建元数据过滤器
-    用途：精确过滤目的地、适合人群等
-    
-    面试考点：为什么需要元数据过滤？
-    答：避免向量检索召回不相关的结果（如用户要去北京却检索到上海）
-    """
-    filters = {}
-    
-    # 1. 目的地过滤（必须）
-    filters["city"] = prefs.destination
-    
-    # 2. 根据出行类型过滤适合人群
-    trip_type_map = {
-        "family": "家庭",
-        "couple": "情侣",
-        "friends": "朋友",
-        "personal": None  # 个人游不限
-    }
-    suitable = trip_type_map.get(prefs.trip_type)
-    if suitable:
-        filters["suitable_for"] = {"$in": [suitable, "所有人"]}
-    
-    # 3. 根据预算过滤价格范围
-    price_limits = {
-        "budget": 100,
-        "medium": 300,
-        "luxury": 999999
-    }
-    max_price = price_limits.get(prefs.budget_level, 300)
-    filters["price"] = {"$lte": max_price}
-    
-    logger.info(f"构建的元数据过滤器：{filters}")
-    return filters
+        # 调用 RAG Pipeline 检索
+        routes = rag_pipeline.search_routes(destination=destination, days=days, preferences=preferences)
+        logger.info(f"RAG Pipeline 检索返回 {len(routes)} 条路线")
 
-@app.route('/documents/upload', methods=['POST'])
-def upload_document():
-    file = request.files['file']
-    if not file:
-        return jsonify({"error": "No file provided"}), 400
-    filename = file.filename
-    filepath = os.path.join('./data/uploads', filename)
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    file.save(filepath)
+        if not routes:
+            logger.warning(f"未找到匹配的路线：{destination}")
+            return jsonify({
+                "routes": [],
+                "message": f"暂未找到关于{destination}的路线，试试其他目的地吧"
+            }), 200
 
-    try:
-        result = doc_loader.process_document(filepath)
-        leaf_chunks = result['leaf_chunks']
-        parent_chunks = result['parent_chunks']
+        return jsonify({"routes": routes})
 
-        # 向量化叶子块
-        texts = [chunk['text'] for chunk in leaf_chunks]
-        embeddings = embedding_service.get_embeddings(texts)
-
-        # 存入 Chroma
-        ids = [chunk['chunk_id'] for chunk in leaf_chunks]
-        metadatas = [{"level": chunk['level'], "parent_id": chunk['parent_id']} for chunk in leaf_chunks]
-        chroma_client.add_chunks(ids, embeddings, metadatas, texts)
-
-        # 存入父块
-        for parent in parent_chunks:
-            parent_store.add_parent_chunk(
-                parent['chunk_id'],
-                parent['text'],
-                {"level": parent['level'], "parent_id": parent['parent_id']}
-            )
-
-        return jsonify(DocumentUploadResponse(
-            doc_id=os.path.basename(filepath),
-            filename=filename,
-            chunks_processed=len(leaf_chunks)
-        ).dict())
     except Exception as e:
-        logger.exception("Document upload failed")
-        return jsonify({"error": str(e)}), 500
+        logger.error(f"生成路线失败：{e}")
+        return jsonify({"error": f"服务器内部错误：{str(e)}"}), 500
 
-@app.route('/sessions/<user_id>', methods=['GET'])
-def list_sessions(user_id):
-    sessions = storage.list_sessions(user_id)
-    return jsonify(sessions)
 
-@app.route('/sessions/<user_id>/<session_id>', methods=['GET'])
-def get_session_messages(user_id, session_id):
-    messages = storage.load_messages(session_id)
-    return jsonify(messages)
+@app.route('/api/route-detail', methods=['POST'])
+def get_route_detail():
+    """
+    获取路线详情 API
+    调用 LLM 服务生成路线详情和小红书风格概览
+    """
+    try:
+        data = request.get_json()
+        if not data or not data.get('route'):
+            return jsonify({"error": "请求体缺少路线信息"}), 400
 
-@app.route('/sessions/<user_id>/<session_id>', methods=['DELETE'])
-def delete_session(user_id, session_id):
-    storage.delete_session(session_id)
-    return jsonify({"status": "deleted"})
+        route = data['route']
+        preferences = data.get('preferences', [])
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({"status": "ok"})
+        logger.info(f"收到路线详情生成请求：{route.get('product_name', 'unknown')}")
+
+        # 提取参数
+        days = route.get('days', 3)
+        product_name = route.get('product_name', '精选路线')
+        route_path = route.get('route', '')
+        destination = extract_destination(product_name)
+
+        # 优先调用 LLM 服务生成小红书风格概览（核心展示内容）
+        logger.info("正在生成小红书风格概览...")
+        xiaohongshu_overview = llm_service.generate_xiaohongshu_overview(
+            destination=destination,
+            days=days,
+            product_name=product_name,
+            route_path=route_path,
+            preferences=preferences
+        )
+
+        # 调用 LLM 服务生成路线详情
+        logger.info("正在生成详细行程规划...")
+        detail = llm_service.generate_route_detail(
+            destination=destination,
+            days=days,
+            product_name=product_name,
+            route_path=route_path,
+            preferences=preferences
+        )
+
+        # 格式化概览并合并到详情
+        if xiaohongshu_overview and detail:
+            overview_text = LLMService.format_overview(xiaohongshu_overview)
+            if overview_text:
+                detail['overview'] = overview_text
+                logger.info("小红书风格概览生成成功")
+            else:
+                logger.warning("小红书风格概览格式化失败，使用默认概览")
+            detail['route_overview'] = xiaohongshu_overview
+        elif detail:
+            # 小红书概览生成失败，但 detail 成功，记录日志
+            logger.warning("小红书风格概览生成失败（可能超时），使用默认概览")
+
+        # LLM 失败时降级到模板
+        if not detail:
+            logger.warning(f"路线详情生成失败，降级到模板：{destination}")
+            detail = generate_template_route(destination, days, preferences)
+            # 如果有小红书概览，仍然使用
+            if xiaohongshu_overview:
+                overview_text = LLMService.format_overview(xiaohongshu_overview)
+                if overview_text:
+                    detail['overview'] = overview_text
+                detail['route_overview'] = xiaohongshu_overview
+
+        return jsonify(detail)
+
+    except Exception as e:
+        logger.error(f"生成路线详情失败：{e}")
+        return jsonify({"error": f"服务器内部错误：{str(e)}"}), 500
+
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    host = os.getenv('FLASK_HOST', '0.0.0.0')
+    port = int(os.getenv('FLASK_PORT', '5001'))
+    debug = os.getenv('FLASK_DEBUG', 'false').lower() == 'true'
+
+    logger.info(f"启动 Flask 服务：http://{host}:{port}")
+    app.run(host=host, port=port, debug=debug)

@@ -1,209 +1,199 @@
-from typing import TypedDict, Literal, List, Optional
-from langgraph.graph import StateGraph, END
-from langchain.chat_models import init_chat_model
-from langchain_core.pydantic_v1 import BaseModel, Field
-from .utils import get_env, logger
-from .rag_utils import retrieve_documents, step_back_expand, generate_hypothetical_document
-from .tools import emit_rag_step
+"""
+RAG 检索 pipeline
+技术原理：结合向量检索和元数据过滤，从知识库中检索相关旅游路线
+面试考点：检索策略、排序算法、混合检索
+"""
+import os
+from typing import List, Dict, Optional
+from chroma_client import ChromaClient
+from embedding import EmbeddingService
+from utils import logger
 
-# 模型初始化
-API_KEY = get_env("ARK_API_KEY")
-MODEL = get_env("MODEL")
-BASE_URL = get_env("BASE_URL")
-GRADE_MODEL = get_env("GRADE_MODEL", MODEL)
 
-def _get_model(model_name):
-    return init_chat_model(
-        model=model_name,
-        model_provider="openai",
-        api_key=API_KEY,
-        base_url=BASE_URL,
-        temperature=0
-    )
+class RAGPipeline:
+    """
+    RAG 检索 pipeline
+    负责接收用户查询，检索知识库中的旅游路线
+    """
 
-# 评分模型
-class GradeDocuments(BaseModel):
-    binary_score: Literal["yes", "no"] = Field(description="Relevance score")
+    def __init__(self):
+        self.chroma_client = ChromaClient()
+        self.embedding_service = EmbeddingService()
 
-# 路由模型
-class RewriteStrategy(BaseModel):
-    strategy: Literal["step_back", "hyde", "complex"]
+    def search_routes(
+        self,
+        destination: str,
+        days: int = 5,
+        preferences: Optional[List[str]] = None
+    ) -> List[Dict]:
+        """
+        根据用户查询检索旅游路线
 
-# 状态定义
-class RAGState(TypedDict):
-    question: str
-    query: str
-    context: str
-    docs: List[dict]
-    route: Optional[str]
-    expansion_type: Optional[str]
-    expanded_query: Optional[str]
-    step_back_question: Optional[str]
-    step_back_answer: Optional[str]
-    hypothetical_doc: Optional[str]
-    rag_trace: Optional[dict]
+        Args:
+            destination: 目的地
+            days: 游玩天数
+            preferences: 偏好标签列表
 
-def _format_docs(docs: List[dict]) -> str:
-    if not docs:
-        return ""
-    parts = []
-    for i, doc in enumerate(docs, 1):
-        source = doc.get("metadata", {}).get("source", "Unknown")
-        text = doc.get("text", "")
-        parts.append(f"[{i}] {source}:\n{text}")
-    return "\n\n---\n\n".join(parts)
+        Returns:
+            路线列表，每个路线包含 product_name, route, sales, reviews
+        """
+        logger.info(f"开始检索：目的地={destination}, 天数={days}, 偏好={preferences}")
 
-# 节点函数
-def retrieve_initial(state: RAGState) -> RAGState:
-    query = state["question"]
-    emit_rag_step("🔍", "正在检索知识库...")
-    result = retrieve_documents(query, top_k=5)
-    docs = result.get("docs", [])
-    meta = result.get("meta", {})
-    context = _format_docs(docs)
-    emit_rag_step("✅", f"检索完成，找到 {len(docs)} 个片段")
-    rag_trace = {
-        "tool_used": True,
-        "query": query,
-        "retrieved_chunks": docs,
-        "retrieval_meta": meta
-    }
-    return {
-        "query": query,
-        "docs": docs,
-        "context": context,
-        "rag_trace": rag_trace
-    }
+        # 1. 构建查询文本
+        query_text = self._build_query_text(destination, preferences)
 
-def grade_documents(state: RAGState) -> RAGState:
-    emit_rag_step("📊", "正在评估文档相关性...")
-    grader = _get_model(GRADE_MODEL).with_structured_output(GradeDocuments)
-    prompt = f"""You are a grader assessing relevance of a retrieved document to a user question.
-Here is the retrieved document: {state['context']}
-Here is the user question: {state['question']}
-Give a binary score 'yes' or 'no' to indicate whether the document is relevant."""
-    try:
-        response = grader.invoke([{"role": "user", "content": prompt}])
-        score = response.binary_score
-    except Exception as e:
-        logger.error(f"Grading failed: {e}")
-        score = "no"
-    route = "generate_answer" if score == "yes" else "rewrite_question"
-    emit_rag_step("✅" if score == "yes" else "⚠️", f"评分结果: {score}")
-    rag_trace = state.get("rag_trace", {})
-    rag_trace.update({"grade_score": score, "grade_route": route})
-    return {"route": route, "rag_trace": rag_trace}
+        # 2. 获取查询向量
+        try:
+            query_embedding = self.embedding_service.get_embedding(query_text)
+        except Exception as e:
+            logger.error(f"向量化失败：{e}")
+            query_embedding = [0.0] * 768  # 降级为零向量
 
-def rewrite_question(state: RAGState) -> RAGState:
-    emit_rag_step("✏️", "正在重写查询...")
-    router = _get_model(MODEL).with_structured_output(RewriteStrategy)
-    prompt = f"""请根据用户问题选择最合适的查询扩展策略，仅输出策略名。
-- step_back：包含具体名称、日期、代码等细节，需要先理解通用概念的问题。
-- hyde：模糊、概念性、需要解释或定义的问题。
-- complex：多步骤、需要分解或综合多种信息的复杂问题。
-用户问题：{state['question']}"""
-    try:
-        decision = router.invoke([{"role": "user", "content": prompt}])
-        strategy = decision.strategy
-    except:
-        strategy = "step_back"
+        # 3. 查询知识库
+        results = self._query_knowledge_base(query_embedding, destination)
 
-    expanded_query = state["question"]
-    step_back_question = ""
-    step_back_answer = ""
-    hypothetical_doc = ""
+        # 4. 处理和排序结果
+        routes = self._process_results(results, destination, days, preferences)
 
-    if strategy in ("step_back", "complex"):
-        step_back = step_back_expand(state["question"])
-        step_back_question = step_back.get("step_back_question", "")
-        step_back_answer = step_back.get("step_back_answer", "")
-        expanded_query = step_back.get("expanded_query", state["question"])
-    if strategy in ("hyde", "complex"):
-        hypothetical_doc = generate_hypothetical_document(state["question"])
+        logger.info(f"检索完成，返回 {len(routes)} 条路线")
+        return routes
 
-    emit_rag_step("🧠", f"使用策略: {strategy}")
-    rag_trace = state.get("rag_trace", {})
-    rag_trace.update({
-        "rewrite_strategy": strategy,
-        "rewrite_query": expanded_query
-    })
-    return {
-        "expansion_type": strategy,
-        "expanded_query": expanded_query,
-        "step_back_question": step_back_question,
-        "step_back_answer": step_back_answer,
-        "hypothetical_doc": hypothetical_doc,
-        "rag_trace": rag_trace
-    }
+    def _build_query_text(self, destination: str, preferences: Optional[List[str]]) -> str:
+        """
+        构建查询文本（用于向量化）
 
-def retrieve_expanded(state: RAGState) -> RAGState:
-    emit_rag_step("🔄", "使用扩展查询重新检索...")
-    strategy = state.get("expansion_type", "step_back")
-    all_docs = []
+        将用户输入转换为自然语言描述，提升向量检索效果
+        """
+        parts = [f"我想去{destination}旅游"]
 
-    if strategy in ("hyde", "complex"):
-        hyde_doc = state.get("hypothetical_doc") or generate_hypothetical_document(state["question"])
-        res = retrieve_documents(hyde_doc, top_k=5)
-        all_docs.extend(res.get("docs", []))
-    if strategy in ("step_back", "complex"):
-        expanded_query = state.get("expanded_query", state["question"])
-        res = retrieve_documents(expanded_query, top_k=5)
-        all_docs.extend(res.get("docs", []))
+        if preferences:
+            pref_text = "、".join(preferences)
+            parts.append(f"喜欢{pref_text}")
 
-    # 去重
-    seen = set()
-    deduped = []
-    for doc in all_docs:
-        key = (doc.get("text"), doc.get("metadata", {}).get("source"))
-        if key not in seen:
-            seen.add(key)
-            deduped.append(doc)
+        return "；".join(parts)
 
-    context = _format_docs(deduped)
-    emit_rag_step("✅", f"扩展检索完成，共 {len(deduped)} 个片段")
-    rag_trace = state.get("rag_trace", {})
-    rag_trace.update({
-        "expanded_retrieved_chunks": deduped,
-        "retrieval_stage": "expanded"
-    })
-    return {"docs": deduped, "context": context, "rag_trace": rag_trace}
+    def _query_knowledge_base(
+        self,
+        query_embedding: List[float],
+        destination: str,
+        n_results: int = 10
+    ) -> Dict:
+        """
+        查询 Chroma 知识库
 
-# 构建图
-def build_rag_graph():
-    graph = StateGraph(RAGState)
-    graph.add_node("retrieve_initial", retrieve_initial)
-    graph.add_node("grade_documents", grade_documents)
-    graph.add_node("rewrite_question", rewrite_question)
-    graph.add_node("retrieve_expanded", retrieve_expanded)
+        策略：跨所有知识库集合查询，获取最相关的路线
+        """
+        try:
+            # 跨所有知识库查询
+            results = self.chroma_client.query_knowledge_across_all(
+                query_embedding=query_embedding,
+                n_results=n_results
+            )
+            logger.info(f"知识库查询结果：{len(results.get('ids', []))} 条")
+            return results
+        except Exception as e:
+            logger.error(f"知识库查询失败：{e}")
+            return {'ids': [], 'documents': [], 'metadatas': [], 'distances': []}
 
-    graph.set_entry_point("retrieve_initial")
-    graph.add_edge("retrieve_initial", "grade_documents")
-    graph.add_conditional_edges(
-        "grade_documents",
-        lambda state: state.get("route"),
-        {
-            "generate_answer": END,
-            "rewrite_question": "rewrite_question"
-        }
-    )
-    graph.add_edge("rewrite_question", "retrieve_expanded")
-    graph.add_edge("retrieve_expanded", END)
-    return graph.compile()
+    def _process_results(
+        self,
+        results: Dict,
+        destination: str,
+        days: int,
+        preferences: Optional[List[str]]
+    ) -> List[Dict]:
+        """
+        处理检索结果，转换为前端需要的格式
 
-rag_graph = build_rag_graph()
+        1. 解析元数据
+        2. 过滤目的地匹配的路线
+        3. 过滤天数匹配的路线
+        4. 按相关性和销量排序
+        """
+        routes = []
 
-def run_rag_pipeline(question: str) -> dict:
-    result = rag_graph.invoke({
-        "question": question,
-        "query": question,
-        "context": "",
-        "docs": [],
-        "route": None,
-        "expansion_type": None,
-        "expanded_query": None,
-        "step_back_question": None,
-        "step_back_answer": None,
-        "hypothetical_doc": None,
-        "rag_trace": None
-    })
-    return result
+        ids = results.get('ids', [])
+        documents = results.get('documents', [])
+        metadatas = results.get('metadatas', [])
+        distances = results.get('distances', [])
+
+        if not ids:
+            return []
+
+        for i in range(len(ids)):
+            metadata = metadatas[i] if i < len(metadatas) else {}
+            document = documents[i] if i < len(documents) else ""
+            distance = distances[i] if i < len(distances) else None
+
+            # 提取元数据
+            route_data = {
+                'product_name': metadata.get('product_name', ''),
+                'route': metadata.get('route', ''),
+                'sales': metadata.get('sales', 0),
+                'reviews': metadata.get('reviews', 0),
+                'distance': distance,
+                'days': metadata.get('days'),
+            }
+
+            # 目的地匹配检查：必须包含目的地关键词
+            if destination and route_data['product_name']:
+                # 检查产品名称或轨迹中是否包含目的地
+                if destination not in route_data['product_name'] and \
+                   destination not in route_data['route']:
+                    # 不包含目的地，过滤掉
+                    continue
+
+            # 天数匹配检查：只返回与用户选择天数匹配的路线
+            if days and route_data['days']:
+                if route_data['days'] != days:
+                    # 天数不匹配，过滤掉
+                    continue
+
+            routes.append(route_data)
+
+        # 排序：优先按目的地匹配度，再按距离（相关性），最后按销量
+        def sort_key(x):
+            # 目的地匹配分数：产品名称中包含目的地得最高分
+            name_match = 1 if destination in x.get('product_name', '') else 0
+            route_match = 1 if destination in x.get('route', '') else 0
+            return (
+                -(name_match + route_match),  # 匹配度越高越优先（负数排序）
+                x.get('distance') or float('inf'),  # 距离越小越相关
+                -(x.get('sales') or 0)  # 销量越高越优先
+            )
+
+        routes.sort(key=sort_key)
+
+        return routes
+
+
+# 便捷函数
+def search_routes(
+    destination: str,
+    days: int = 5,
+    preferences: Optional[List[str]] = None
+) -> List[Dict]:
+    """便捷函数：检索旅游路线"""
+    pipeline = RAGPipeline()
+    return pipeline.search_routes(destination, days, preferences)
+
+
+if __name__ == "__main__":
+    # 测试代码
+    pipeline = RAGPipeline()
+
+    print("=== 测试 RAG 检索 ===")
+
+    test_cases = [
+        {"destination": "桂林", "days": 5, "preferences": ["山水"]},
+        {"destination": "阳朔", "days": 3, "preferences": ["美食", "徒步"]},
+        {"destination": "云南", "days": 7, "preferences": ["文化", "古镇"]},
+    ]
+
+    for test in test_cases:
+        print(f"\n查询：{test}")
+        routes = pipeline.search_routes(**test)
+        print(f"找到 {len(routes)} 条路线")
+
+        for i, route in enumerate(routes[:3]):  # 只显示前 3 条
+            print(f"  {i + 1}. {route['product_name']} (销量：{route['sales']})")

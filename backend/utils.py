@@ -1,50 +1,46 @@
 """
-工具函数模块
-技术原理：环境变量加载、日志配置
-面试考点：Python 项目基础架构
+工具模块
+提供日志记录、环境变量读取等通用功能
 """
-import os
 import logging
+import sys
+import os
 from dotenv import load_dotenv
 
-# 加载环境变量
-load_dotenv()
+# 加载 .env 文件（优先加载 backend/.env，否则加载项目根目录的.env）
+import pathlib
+backend_dir = pathlib.Path(__file__).parent
+env_file = backend_dir / '.env'
+if not env_file.exists():
+    env_file = backend_dir.parent / '.env'
+load_dotenv(dotenv_path=str(env_file))
+
+# 配置日志
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# 创建控制台处理器
+handler = logging.StreamHandler(sys.stdout)
+handler.setLevel(logging.INFO)
+
+# 创建格式器
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+
+# 添加处理器到日志记录器
+if not logger.handlers:
+    logger.addHandler(handler)
 
 
-def get_env(key, default=None):
+def get_env(key: str, default: str = None) -> str:
     """
-    获取环境变量的辅助函数
-    
-    使用示例：
-    API_KEY = get_env("API_KEY")  # 必填
-    PORT = get_env("PORT", 5000)  # 有默认值
+    获取环境变量
+
+    Args:
+        key: 环境变量名称
+        default: 默认值
+
+    Returns:
+        环境变量值
     """
     return os.getenv(key, default)
-
-
-def setup_logging():
-    """
-    配置日志系统
-    
-    技术原理：
-    - logging 是 Python 标准库日志模块
-    - basicConfig 配置全局日志级别和格式
-    - getLogger 获取 logger 实例
-    
-    面试考点：为什么用 logging 而不是 print？
-    答：
-    - 可配置日志级别（DEBUG/INFO/WARNING/ERROR）
-    - 可输出到文件/控制台/远程服务
-    - 线程安全，支持并发
-    - 生产环境可动态调整日志级别
-    """
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    return logging.getLogger(__name__)
-
-
-# 全局 logger 实例
-logger = setup_logging()

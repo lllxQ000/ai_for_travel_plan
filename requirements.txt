@@ -1,15 +1,47 @@
-Flask==2.3.3
-flask-cors==4.0.0
-python-dotenv==1.0.0
-langchain>=0.3.0,<0.4.0
-langchain-community>=0.3.0,<0.4.0
-langchain-openai>=0.2.0,<0.3.0
-langgraph>=0.2.50,<0.3.0
-chromadb>=0.5.0,<0.6.0
-dashscope>=1.14.0
-pypdf>=4.0.0
-python-docx>=1.1.0
-jieba>=0.42.1
-rank-bm25>=0.2.2
-pydantic>=2.7.4,<3.0.0
-requests>=2.31.0
+# Web 框架
+Flask==3.0.3
+flask-cors==5.0.0
+python-dotenv==1.0.1
+
+# LangChain 核心 - 经验证兼容的稳定版本
+langchain==0.3.27
+langchain-core==0.3.80
+langchain-community==0.3.27
+langchain-text-splitters==0.3.9
+
+# LangChain OpenAI (用于 OpenAI 兼容 API)
+langchain-openai==0.2.14
+openai==1.58.1
+
+# LangGraph - 与 langchain 0.3.x 兼容
+langgraph==0.3.16
+langgraph-checkpoint==2.0.23
+langgraph-sdk==0.1.51
+langgraph-prebuilt==0.1.8
+
+# 向量数据库
+chromadb==0.5.23
+
+# 阿里云百炼 SDK
+dashscope==1.22.0
+
+# 文档处理
+pypdf==5.1.0
+python-docx==1.1.2
+
+# 中文分词
+jieba==0.42.1
+
+# BM25 检索
+rank-bm25==0.2.2
+
+# 数据验证
+pydantic==2.10.4
+pydantic-core==2.27.2
+
+# HTTP 请求
+requests==2.32.3
+urllib3==2.3.0
+
+# 本地嵌入模型（Ollama 降级方案）
+sentence-transformers==2.7.0
