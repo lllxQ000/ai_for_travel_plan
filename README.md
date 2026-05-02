@@ -25,7 +25,6 @@
 6. [后端模块详解](#6-后端模块详解)
 7. [完整调用流程](#7-完整调用流程)
 8. [关键技术点解析](#8-关键技术点解析)
-9. [部署与运行](#9-部署与运行)
 
 ---
 
@@ -705,66 +704,8 @@ session.proxies = {'http': '', 'https': ''}
 
 ---
 
-## 9. 部署与运行
 
-### 9.1 环境准备
-
-```bash
-git clone https://github.com/lllxQ000/ai_for_travel_plan.git
-cd AI_for_travel_plan
-python -m venv .venv
-
-# Linux / Mac
-source .venv/bin/activate
-
-# Windows
-.venv\Scripts\activate
-
-pip install -r requirements.txt
-```
-
-### 9.2 配置 API Key
-
-编辑 `backend/.env`，填入阿里云百炼 API Key：
-
-```bash
-ARK_API_KEY=你的_API_Key
-```
-
-> 获取 API Key：[阿里云百炼控制台](https://bailian.console.aliyun.com/)
-
-### 9.3 导入知识库
-
-```bash
-cd backend
-python import_knowledge.py --directory ../data
-```
-
-### 9.4 启动服务
-
-```bash
-python backend/app.py
-# 浏览器访问 http://127.0.0.1:5001
-```
-
-### 9.5 API 测试
-
-```bash
-# 健康检查
-curl http://127.0.0.1:5001/api/health
-
-# RAG 检索路线
-curl -X POST http://127.0.0.1:5001/api/generate \
-  -H "Content-Type: application/json" \
-  -d '{"destination":"桂林","days":3,"preferences":["美食","拍照"]}'
-
-# LLM 生成路线详情 + 小红书概览
-curl -X POST http://127.0.0.1:5001/api/route-detail \
-  -H "Content-Type: application/json" \
-  -d '{"route":{"product_name":"桂林+阳朔3日游","days":3,"route":"桂林→阳朔→西街"},"preferences":["美食"]}'
-```
-
-### 9.6 项目架构图（一览）
+项目架构图（一览）
 
 ```
 frontend/                    backend/
